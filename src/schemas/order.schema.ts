@@ -35,7 +35,13 @@ export const createOrderSchema = z.object({
   customerName: z.string().min(1, 'El nombre del cliente es requerido').max(200),
   customerEmail: z.string().email('Correo inválido').max(255),
   customerDocumentId: z.string().optional(),
-  customerPhone: z.string().optional(),
+  customerPhone: z
+    .string()
+    .trim()
+    .min(10, 'Indica un WhatsApp disponible para coordinar tu pedido')
+    .refine((value) => value.replace(/\D/g, '').length >= 10, {
+      message: 'Indica un WhatsApp válido con código de operadora',
+    }),
   deliveryMethod: z.enum(['PICKUP', 'DELIVERY']).default('PICKUP'),
   deliveryState: z.string().max(100).optional(),
   deliveryCity: z.string().max(100).optional(),

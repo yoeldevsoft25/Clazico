@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { eq, and, desc, or, sql } from 'drizzle-orm';
+import { eq, and, desc, inArray, or, sql } from 'drizzle-orm';
 import { TRPCError } from '@trpc/server';
 import { randomUUID } from 'crypto';
 import * as schema from '@/../drizzle/schema';
@@ -490,7 +490,7 @@ export const orderRouter = createTRPCRouter({
         conditions.push(eq(schema.orders.status, statusMap[input.status]));
       }
 
-      const items = await ctx.db
+      const orders = await ctx.db
         .select()
         .from(schema.orders)
         .where(and(...conditions))
@@ -498,13 +498,32 @@ export const orderRouter = createTRPCRouter({
         .limit(input.limit)
         .offset(input.offset);
 
+      const orderIds = orders.map((order) => order.id);
+      const orderItems =
+        orderIds.length === 0
+          ? []
+          : await ctx.db
+              .select()
+              .from(schema.orderItems)
+              .where(inArray(schema.orderItems.orderId, orderIds));
+
+      const itemsByOrder = new Map<string, typeof orderItems>();
+      for (const item of orderItems) {
+        const current = itemsByOrder.get(item.orderId) ?? [];
+        current.push(item);
+        itemsByOrder.set(item.orderId, current);
+      }
+
       const [countResult] = await ctx.db
         .select({ count: sql<number>`COUNT(*)` })
         .from(schema.orders)
         .where(and(...conditions));
 
       return {
-        items,
+        items: orders.map((order) => ({
+          ...order,
+          items: itemsByOrder.get(order.id) ?? [],
+        })),
         total: countResult?.count ?? 0,
         limit: input.limit,
         offset: input.offset,

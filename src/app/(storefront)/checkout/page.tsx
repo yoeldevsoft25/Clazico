@@ -125,6 +125,10 @@ export default function CheckoutPage() {
       alert('Tu carrito mezcla varios lookbooks. Finaliza un drop a la vez para mantener la venta coherente.');
       return;
     }
+    if (customerPhone.replace(/\D/g, '').length < 10) {
+      alert('Indica un número de WhatsApp disponible para coordinar tu pedido.');
+      return;
+    }
 
     try {
       setIsSubmitting(true);
@@ -201,7 +205,7 @@ export default function CheckoutPage() {
       ? formatUSD(createdOrder.totalUsd)
       : formatBsS(createdOrder.totalBss);
     const storePhone = toWhatsappPhone(STORE_INFO.phone);
-    const waText = `Hola Clazico Store. Pedido ${createdOrder.orderNumber} por ${totalString}. Método: ${paymentLabels[paymentMethod]}. Nombre: ${customerName}.`;
+    const waText = `Hola Clazico Store. Pedido ${createdOrder.orderNumber} por ${totalString}. Método: ${paymentLabels[paymentMethod]}. Nombre: ${customerName}. WhatsApp disponible: ${customerPhone}. Entrega: ${getDeliveryLabel(deliveryOption)}.`;
     const waUrl = `https://wa.me/${storePhone}?text=${encodeURIComponent(waText)}`;
 
     return (
@@ -290,10 +294,15 @@ export default function CheckoutPage() {
                     placeholder="EJ: V-12345678"
                   />
                 </Field>
-                <Field label="Teléfono de Contacto (WhatsApp)">
+                <Field
+                  label="WhatsApp disponible"
+                  hint="Usa un número activo. Desde Mi Cuenta podrás coordinar entrega, guía o retiro con este pedido."
+                >
                   <input
                     required
                     type="tel"
+                    inputMode="tel"
+                    autoComplete="tel"
                     value={customerPhone}
                     onChange={(event) => setPhone(event.target.value)}
                     className="checkout-input font-mono text-xs font-bold uppercase tracking-wider"
@@ -503,11 +512,24 @@ function CheckoutSection({ title, children }: { title: string; children: React.R
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  children: React.ReactNode;
+}) {
   return (
     <label className="block">
       <span className="mb-2 block text-[10px] font-black uppercase tracking-widest text-zinc-500">{label}</span>
       {children}
+      {hint && (
+        <span className="mt-2 block text-[10px] font-bold uppercase leading-5 tracking-wider text-zinc-600">
+          {hint}
+        </span>
+      )}
     </label>
   );
 }

@@ -21,10 +21,12 @@ export default function ProfilePage() {
   const trpc = useTRPC();
   const { data: session, isPending } = useSession();
   const ordersQuery = useQuery(
-    trpc.order.myOrders.queryOptions(
-      { limit: 20, offset: 0 },
-      { enabled: Boolean(session?.user) },
-    ),
+    {
+      ...trpc.order.myOrders.queryOptions({ limit: 20, offset: 0 }),
+      enabled: Boolean(session?.user),
+      refetchInterval: 30_000,
+      refetchIntervalInBackground: false,
+    },
   );
 
   const orders = ordersQuery.data?.items ?? [];
@@ -119,7 +121,17 @@ type OrderSummaryRow = {
   totalUsd: string | number;
   totalBss: string | number | null;
   deliveryMethod: string;
+  deliveryAddressText: string | null;
+  customerNotes: string | null;
   createdAt: Date | string;
+  items?: Array<{
+    id: string;
+    productName: string;
+    productSku: string;
+    variantSku: string | null;
+    quantity: number;
+    totalUsd: string | number;
+  }>;
 };
 
 type OrdersPanelProps = {
@@ -214,6 +226,8 @@ function OrdersPanel({ isLoading, isError, orders, total }: OrdersPanelProps) {
 function OrderRow({ order }: { order: OrderSummaryRow }) {
   const status = getProfileOrderStatus(order.status);
   const totalBss = order.totalBss === null ? null : Number(order.totalBss);
+  const delivery = getOrderDeliveryContext(order);
+  const orderItems = order.items ?? [];
   const officialPhones = [
     { label: 'WhatsApp Principal', phone: STORE_INFO.phone },
     { label: 'WhatsApp Secundario', phone: STORE_INFO.phone1 },
@@ -234,7 +248,7 @@ function OrderRow({ order }: { order: OrderSummaryRow }) {
               <CalendarDays className="h-3.5 w-3.5" />
               {formatDate(order.createdAt)}
             </span>
-            <span>{getDeliveryMethodLabel(order.deliveryMethod)}</span>
+            <span>{delivery.label}</span>
           </p>
         </div>
         <div className="shrink-0">
@@ -257,6 +271,41 @@ function OrderRow({ order }: { order: OrderSummaryRow }) {
       </div>
 
       <div className="mt-4 grid gap-4 border-t border-white/5 pt-4">
+        {orderItems.length > 0 && (
+          <div className="border border-white/5 bg-zinc-900/30 p-3">
+            <p className="text-[10px] font-black uppercase tracking-widest text-zinc-500">
+              Productos
+            </p>
+            <div className="mt-3 space-y-2">
+              {orderItems.map((item) => (
+                <div key={item.id} className="flex items-start justify-between gap-3 text-xs">
+                  <div className="min-w-0">
+                    <p className="line-clamp-1 font-black uppercase tracking-tight text-white">
+                      {item.productName}
+                    </p>
+                    <p className="mt-1 text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+                      SKU {item.productSku}
+                      {item.variantSku ? ` · Variante ${item.variantSku}` : ''} · x{item.quantity}
+                    </p>
+                  </div>
+                  <p className="shrink-0 font-mono text-xs font-black text-zinc-300">
+                    {formatUSD(Number(item.totalUsd))}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="border border-white/5 bg-zinc-900/30 p-3">
+          <p className="text-[10px] font-black uppercase tracking-widest text-zinc-500">
+            Entrega
+          </p>
+          <p className="mt-1.5 text-xs font-bold uppercase leading-5 tracking-wider text-zinc-300">
+            {delivery.description}
+          </p>
+        </div>
+
         <div className="grid grid-cols-2 gap-3">
           <div>
             <p className="text-[9px] font-black uppercase tracking-widest text-zinc-600">Total USD</p>
@@ -272,13 +321,13 @@ function OrderRow({ order }: { order: OrderSummaryRow }) {
 
         <div>
           <p className="mb-2 text-[9px] font-black uppercase tracking-widest text-zinc-600">
-            Preguntar sobre esta orden
+            Coordinar esta orden
           </p>
           <div className="grid gap-2 sm:grid-cols-2">
             {officialPhones.map((contact) => (
               <a
                 key={contact.phone}
-                href={buildOrderWhatsAppUrl(contact.phone, order.orderNumber, status.label)}
+                href={buildOrderWhatsAppUrl(contact.phone, order, status.label, delivery.label)}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex min-h-11 items-center justify-center gap-2 border border-white/10 px-4 text-center text-[10px] font-black uppercase tracking-widest text-white transition-colors hover:border-white hover:bg-white hover:text-zinc-950"
@@ -299,9 +348,21 @@ function OrderRow({ order }: { order: OrderSummaryRow }) {
   );
 }
 
-function buildOrderWhatsAppUrl(phone: string, orderNumber: string, statusLabel: string): string {
+function buildOrderWhatsAppUrl(
+  phone: string,
+  order: OrderSummaryRow,
+  statusLabel: string,
+  deliveryLabel: string,
+): string {
   const whatsappPhone = toWhatsappPhone(phone);
-  const message = `Hola Clazico Store. Quiero consultar el estado de mi pedido ${orderNumber}. Estado actual en la web: ${statusLabel}.`;
+  const message = [
+    `Hola Clazico Store. Quiero coordinar mi pedido ${order.orderNumber}.`,
+    `Estado en la web: ${statusLabel}.`,
+    `Entrega: ${deliveryLabel}.`,
+    order.deliveryAddressText ? `Dirección/agencia: ${order.deliveryAddressText}.` : null,
+  ]
+    .filter(Boolean)
+    .join(' ');
 
   return `https://wa.me/${whatsappPhone}?text=${encodeURIComponent(message)}`;
 }
@@ -323,6 +384,41 @@ function getDeliveryMethodLabel(method: string): string {
   };
 
   return labels[method] ?? method;
+}
+
+function getOrderDeliveryContext(order: OrderSummaryRow): { label: string; description: string } {
+  const note = order.customerNotes ?? '';
+  if (order.deliveryMethod === 'PICKUP') {
+    return {
+      label: 'Retiro en tienda',
+      description: `Retiro en ${STORE_INFO.address}. Coordina por WhatsApp antes de pasar para confirmar disponibilidad de entrega.`,
+    };
+  }
+
+  if (note.toLowerCase().startsWith('delivery maracaibo')) {
+    return {
+      label: 'Delivery Maracaibo',
+      description: order.deliveryAddressText
+        ? `Delivery local a ${order.deliveryAddressText}. Coordina horario y referencia por WhatsApp.`
+        : 'Delivery local en Maracaibo. Coordina dirección, horario y referencia por WhatsApp.',
+    };
+  }
+
+  if (note.toLowerCase().startsWith('envío nacional') || note.toLowerCase().startsWith('envio nacional')) {
+    return {
+      label: 'Envío nacional',
+      description: order.deliveryAddressText
+        ? `Envío nacional a ${order.deliveryAddressText}. Coordina agencia, cédula y guía por WhatsApp.`
+        : 'Envío nacional por encomienda. Coordina agencia, cédula y guía por WhatsApp.',
+    };
+  }
+
+  return {
+    label: getDeliveryMethodLabel(order.deliveryMethod),
+    description: order.deliveryAddressText
+      ? `Entrega registrada: ${order.deliveryAddressText}.`
+      : 'Coordina detalles de entrega o retiro por WhatsApp.',
+  };
 }
 
 function getProfileOrderStatus(status: string): { label: string; description: string; className: string } {
