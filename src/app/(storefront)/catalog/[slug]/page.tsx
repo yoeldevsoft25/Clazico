@@ -504,7 +504,7 @@ export default function ProductDetailPage({ params }: ProductDetailPageProps) {
               </Accordion>
               <Accordion title="Soporte y Garantías">
                 <p className="leading-relaxed">
-                  Ofrecemos hasta 7 días para cambios de talla en nuestra sucursal física, sujeto a disponibilidad en stock de Velox POS.
+                  Ofrecemos hasta 3 días para cambios de talla. El artículo debe devolverse en perfectas condiciones y queda sujeto a revisión y disponibilidad.
                 </p>
               </Accordion>
             </div>

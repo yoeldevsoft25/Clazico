@@ -276,10 +276,17 @@ export const DELIVERY_METHODS = [
   },
   {
     id: "DELIVERY",
-    label: "Delivery",
+    label: "Delivery Maracaibo",
     icon: "🚚",
-    description: "Envío a domicilio (costo según ubicación)",
+    description: "Entrega local solo dentro de Maracaibo, con costo según ubicación",
     price: null, // Calculated per location
+  },
+  {
+    id: "NATIONAL_SHIPPING",
+    label: "Envío Nacional",
+    icon: "📦",
+    description: "Encomienda para el resto del país por MRW, ZOOM, TEALCA u operador acordado",
+    price: null,
   },
 ] as const;
 

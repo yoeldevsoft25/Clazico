@@ -216,7 +216,9 @@ export const termsContent: LegalPageContent = {
       title: 'Cambios por talla, modelo o preferencia',
       bullets: [
         'Los cambios por talla, modelo, color o preferencia del cliente no son automáticos: dependen de aprobación, disponibilidad, estado del producto y cumplimiento de estas condiciones.',
+        'El plazo máximo para solicitar cambio es de tres (3) días continuos desde la entrega o retiro del producto.',
         'El producto debe estar nuevo, sin uso, sin olores, sin manchas, sin alteraciones, con etiquetas, accesorios, caja, empaque y factura o comprobante.',
+        'Todo artículo devuelto queda sujeto a revisión física. Clazico Store puede rechazar el cambio si el producto no está en perfectas condiciones o si la revisión detecta uso, daño, alteración o falta de accesorios.',
         'Los costos de ida, vuelta, diferencia de precio, embalaje y comisiones asociadas al cambio por preferencia del cliente son por cuenta del cliente.',
         'No se cambian productos usados, lavados, alterados, personalizados, de liquidación final, con caja dañada por mal manejo del cliente, ropa interior, medias, productos de higiene, accesorios de contacto directo o artículos indicados como venta final, salvo defecto comprobado imputable a origen.',
         'Si no existe stock para cambio aprobado, Clazico Store podrá ofrecer saldo a favor, alternativa disponible o solución equivalente razonable.',

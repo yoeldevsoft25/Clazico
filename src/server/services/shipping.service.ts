@@ -7,8 +7,9 @@ export const SHIPPING_CONFIG = {
   
   // Pricing rules
   NATIONAL_FLAT_RATE: Number(process.env.NATIONAL_SHIPPING_FEE_USD || 5.00),
-  LOCAL_BASE_RATE: Number(process.env.LOCAL_BASE_FEE_USD || 1.00),
-  LOCAL_PER_KM_RATE: Number(process.env.LOCAL_PER_KM_FEE_USD || 0.50),
+  LOCAL_MIN_FEE_USD: Number(process.env.LOCAL_MIN_FEE_USD || 1.00),
+  LOCAL_RATE_UNIT_KM: Number(process.env.LOCAL_RATE_UNIT_KM || 2),
+  LOCAL_RATE_PER_UNIT_USD: Number(process.env.LOCAL_RATE_PER_UNIT_USD || 1.00),
   MAX_LOCAL_RADIUS_KM: Number(process.env.MAX_LOCAL_RADIUS_KM || 25),
   
   // Promotions
@@ -49,7 +50,7 @@ export function calculateShippingCost(params: {
   
   // Step 1: Zone & Distance
   const isZulia = params.state?.toLowerCase().includes('zulia');
-  const isMaracaibo = params.city?.toLowerCase().includes('maracaibo') || params.city?.toLowerCase().includes('san francisco');
+  const isMaracaibo = params.city?.toLowerCase().includes('maracaibo');
   
   if (isZulia && isMaracaibo) {
     isLocal = true;
@@ -61,17 +62,13 @@ export function calculateShippingCost(params: {
         params.lng
       );
       
-      // Simple distance-based pricing
-      baseFee = SHIPPING_CONFIG.LOCAL_BASE_RATE + (distanceKm * SHIPPING_CONFIG.LOCAL_PER_KM_RATE);
-      
-      // Cap at national rate if distance goes extremely far, or reject
-      if (distanceKm > SHIPPING_CONFIG.MAX_LOCAL_RADIUS_KM) {
-        baseFee = SHIPPING_CONFIG.NATIONAL_FLAT_RATE;
-        isLocal = false;
-      }
+      const distanceUnits = Math.max(1, Math.ceil(distanceKm / SHIPPING_CONFIG.LOCAL_RATE_UNIT_KM));
+      baseFee = Math.max(
+        SHIPPING_CONFIG.LOCAL_MIN_FEE_USD,
+        distanceUnits * SHIPPING_CONFIG.LOCAL_RATE_PER_UNIT_USD,
+      );
     } else {
-      // Maracaibo but no coordinates yet? Charge a default average fee
-      baseFee = SHIPPING_CONFIG.LOCAL_BASE_RATE + (5 * SHIPPING_CONFIG.LOCAL_PER_KM_RATE); // assume ~5km
+      baseFee = 10;
     }
   }
 

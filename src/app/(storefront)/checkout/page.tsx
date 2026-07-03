@@ -20,7 +20,8 @@ type CreatedOrder = {
 };
 
 type PaymentMethod = 'pago_movil' | 'binance' | 'zinli' | 'wally' | 'zelle' | 'efectivo_usd';
-type DeliveryMethod = 'PICKUP' | 'DELIVERY';
+type ApiDeliveryMethod = 'PICKUP' | 'DELIVERY';
+type DeliveryOption = 'PICKUP' | 'LOCAL_DELIVERY' | 'NATIONAL_SHIPPING';
 type CartItem = ReturnType<typeof useCartStore.getState>['items'][number];
 type SessionCheckoutUser = {
   name?: string | null;
@@ -37,6 +38,23 @@ const paymentLabels: Record<PaymentMethod, string> = {
   zelle: 'Zelle',
   efectivo_usd: 'Efectivo USD',
 };
+
+const MARACAIBO_STATE = 'Zulia';
+const MARACAIBO_CITY = 'Maracaibo';
+
+function toApiDeliveryMethod(deliveryOption: DeliveryOption): ApiDeliveryMethod {
+  return deliveryOption === 'PICKUP' ? 'PICKUP' : 'DELIVERY';
+}
+
+function isShippingOption(deliveryOption: DeliveryOption): boolean {
+  return deliveryOption !== 'PICKUP';
+}
+
+function getDeliveryLabel(deliveryOption: DeliveryOption): string {
+  if (deliveryOption === 'LOCAL_DELIVERY') return 'Delivery Maracaibo';
+  if (deliveryOption === 'NATIONAL_SHIPPING') return 'Envío nacional';
+  return 'Retiro en tienda';
+}
 
 export default function CheckoutPage() {
   const trpc = useTRPC();
@@ -55,9 +73,9 @@ export default function CheckoutPage() {
   const [email, setEmail] = useState<string | undefined>();
   const [phone, setPhone] = useState<string | undefined>();
   const [cedula, setCedula] = useState<string | undefined>();
-  const [deliveryMethod, setDeliveryMethod] = useState<DeliveryMethod>('PICKUP');
-  const [stateName, setStateName] = useState('Zulia');
-  const [cityName, setCityName] = useState('Maracaibo');
+  const [deliveryOption, setDeliveryOption] = useState<DeliveryOption>('PICKUP');
+  const [stateName, setStateName] = useState(MARACAIBO_STATE);
+  const [cityName, setCityName] = useState(MARACAIBO_CITY);
   const [deliveryLocation, setDeliveryLocation] = useState({
     lat: 10.6427,
     lng: -71.6125,
@@ -86,10 +104,10 @@ export default function CheckoutPage() {
       itemsTotalUsd: subtotalUsd,
       totalQuantity: totalItems,
     }),
-    enabled: items.length > 0 && deliveryMethod === 'DELIVERY',
+    enabled: items.length > 0 && isShippingOption(deliveryOption),
   });
 
-  const finalShippingFee = deliveryMethod === 'DELIVERY' ? (shippingData?.totalFee ?? 0) : 0;
+  const finalShippingFee = isShippingOption(deliveryOption) ? (shippingData?.totalFee ?? 0) : 0;
   const finalTotalUsd = subtotalUsd + finalShippingFee;
 
   const rate = subtotalUsd > 0 ? subtotalBs / subtotalUsd : 36.715;
@@ -130,18 +148,18 @@ export default function CheckoutPage() {
         currency: isUsdPayment ? 'USD' : 'BS',
         exchangeRate: rate,
         paymentMethod,
-        deliveryMethod,
-        deliveryState: deliveryMethod === 'DELIVERY' ? stateName : undefined,
-        deliveryCity: deliveryMethod === 'DELIVERY' ? cityName : undefined,
+        deliveryMethod: toApiDeliveryMethod(deliveryOption),
+        deliveryState: isShippingOption(deliveryOption) ? stateName : undefined,
+        deliveryCity: isShippingOption(deliveryOption) ? cityName : undefined,
         deliveryAddressText:
-          deliveryMethod === 'DELIVERY' ? deliveryLocation.address : undefined,
-        deliveryLat: deliveryMethod === 'DELIVERY' ? deliveryLocation.lat : undefined,
-        deliveryLng: deliveryMethod === 'DELIVERY' ? deliveryLocation.lng : undefined,
+          isShippingOption(deliveryOption) ? deliveryLocation.address : undefined,
+        deliveryLat: deliveryOption === 'LOCAL_DELIVERY' ? deliveryLocation.lat : undefined,
+        deliveryLng: deliveryOption === 'LOCAL_DELIVERY' ? deliveryLocation.lng : undefined,
         customerName,
         customerEmail,
         note:
-          deliveryMethod === 'DELIVERY'
-            ? `Envio a: ${stateName}, ${cityName}. ${deliveryLocation.address}. GPS ${deliveryLocation.lat}, ${deliveryLocation.lng}`
+          isShippingOption(deliveryOption)
+            ? `${getDeliveryLabel(deliveryOption)}: ${stateName}, ${cityName}. ${deliveryLocation.address}${deliveryOption === 'LOCAL_DELIVERY' ? `. GPS ${deliveryLocation.lat}, ${deliveryLocation.lng}` : ''}`
             : 'Retiro en Tienda',
         customerDocumentId: customerCedula,
         customerPhone,
@@ -296,22 +314,64 @@ export default function CheckoutPage() {
             </CheckoutSection>
 
             <CheckoutSection title="2. Método de Entrega">
-              <div className="grid gap-3 sm:grid-cols-2">
+              <div className="grid gap-3 sm:grid-cols-3">
                 <ChoiceCard
-                  active={deliveryMethod === 'PICKUP'}
+                  active={deliveryOption === 'PICKUP'}
                   title="Retiro en Tienda"
                   subtitle={`${STORE_INFO.address} Sin costo.`}
-                  onClick={() => setDeliveryMethod('PICKUP')}
+                  onClick={() => setDeliveryOption('PICKUP')}
                 />
                 <ChoiceCard
-                  active={deliveryMethod === 'DELIVERY'}
+                  active={deliveryOption === 'LOCAL_DELIVERY'}
+                  title="Delivery Maracaibo"
+                  subtitle="Solo dentro de Maracaibo. Costo según ubicación."
+                  onClick={() => {
+                    setDeliveryOption('LOCAL_DELIVERY');
+                    setStateName(MARACAIBO_STATE);
+                    setCityName(MARACAIBO_CITY);
+                  }}
+                />
+                <ChoiceCard
+                  active={deliveryOption === 'NATIONAL_SHIPPING'}
                   title="Envío Nacional"
-                  subtitle="MRW, ZOOM o TEALCA. Cobro en destino."
-                  onClick={() => setDeliveryMethod('DELIVERY')}
+                  subtitle="Para el resto del país por encomienda o agencia."
+                  onClick={() => setDeliveryOption('NATIONAL_SHIPPING')}
                 />
               </div>
 
-              {deliveryMethod === 'DELIVERY' && (
+              {deliveryOption === 'LOCAL_DELIVERY' && (
+                <div className="mt-4 grid gap-4 border border-white/5 bg-zinc-950 p-5 sm:grid-cols-2 animate-fade-in">
+                  <Field label="Estado">
+                    <input
+                      required
+                      value={stateName}
+                      readOnly
+                      className="checkout-input font-sans text-xs font-bold uppercase tracking-wider"
+                    />
+                  </Field>
+                  <Field label="Ciudad">
+                    <input
+                      required
+                      value={cityName}
+                      readOnly
+                      className="checkout-input font-sans text-xs font-bold uppercase tracking-wider"
+                    />
+                  </Field>
+                  <div className="sm:col-span-2">
+                    <div className="block">
+                      <span className="mb-2 block text-[10px] font-black uppercase tracking-widest text-zinc-500">
+                        Ubicación exacta en Maracaibo
+                      </span>
+                      <DeliveryLocationPicker
+                        value={deliveryLocation}
+                        onChange={setDeliveryLocation}
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {deliveryOption === 'NATIONAL_SHIPPING' && (
                 <div className="mt-4 grid gap-4 border border-white/5 bg-zinc-950 p-5 sm:grid-cols-2 animate-fade-in">
                   <Field label="Estado">
                     <input
@@ -319,7 +379,7 @@ export default function CheckoutPage() {
                       value={stateName}
                       onChange={(event) => setStateName(event.target.value)}
                       className="checkout-input font-sans text-xs font-bold uppercase tracking-wider"
-                      placeholder="ZULIA"
+                      placeholder="EJ: CARABOBO"
                     />
                   </Field>
                   <Field label="Ciudad">
@@ -328,19 +388,25 @@ export default function CheckoutPage() {
                       value={cityName}
                       onChange={(event) => setCityName(event.target.value)}
                       className="checkout-input font-sans text-xs font-bold uppercase tracking-wider"
-                      placeholder="MARACAIBO"
+                      placeholder="EJ: VALENCIA"
                     />
                   </Field>
-                  <div className="sm:col-span-2">
-                    <div className="block">
-                      <span className="mb-2 block text-[10px] font-black uppercase tracking-widest text-zinc-500">
-                        Ubicacion Exacta / Agencia de Envio
-                      </span>
-                      <DeliveryLocationPicker
-                        value={deliveryLocation}
-                        onChange={setDeliveryLocation}
-                      />
-                    </div>
+                  <Field label="Dirección / Agencia de Encomienda">
+                    <input
+                      required
+                      value={deliveryLocation.address}
+                      onChange={(event) =>
+                        setDeliveryLocation((current) => ({
+                          ...current,
+                          address: event.target.value,
+                        }))
+                      }
+                      className="checkout-input font-sans text-xs font-bold uppercase tracking-wider"
+                      placeholder="MRW, ZOOM, TEALCA o dirección completa"
+                    />
+                  </Field>
+                  <div className="rounded-none border border-white/10 bg-white/[0.03] p-4 text-[10px] font-bold uppercase leading-5 tracking-wider text-zinc-500 sm:col-span-2">
+                    El envío nacional se coordina por encomienda. Costos, tiempos y cobertura dependen del transportista y los datos suministrados.
                   </div>
                 </div>
               )}
@@ -386,7 +452,7 @@ export default function CheckoutPage() {
               shippingFee={finalShippingFee}
               totalUsd={finalTotalUsd}
               totalBs={finalTotalBs}
-              deliveryMethod={deliveryMethod}
+              deliveryOption={deliveryOption}
               rate={rate}
               isSubmitting={isSubmitting}
             />
@@ -494,7 +560,7 @@ function PaymentInstructions({
   if (paymentMethod === 'efectivo_usd') {
     return (
       <p className="text-xs uppercase tracking-wider font-bold leading-6 text-zinc-400">
-        Pagas en divisas en efectivo al retirar en tienda o al recibir delivery. Por favor, lleva el monto exacto para agilizar la entrega.
+        Pagas en divisas en efectivo al retirar en tienda o al recibir tu pedido. Por favor, lleva el monto exacto para agilizar la entrega.
       </p>
     );
   }
@@ -606,7 +672,7 @@ function OrderSummary({
   shippingFee,
   totalUsd,
   totalBs,
-  deliveryMethod,
+  deliveryOption,
   rate,
   isSubmitting,
 }: {
@@ -615,7 +681,7 @@ function OrderSummary({
   shippingFee: number;
   totalUsd: number;
   totalBs: number;
-  deliveryMethod: DeliveryMethod;
+  deliveryOption: DeliveryOption;
   rate: number;
   isSubmitting: boolean;
 }) {
@@ -648,9 +714,9 @@ function OrderSummary({
 
       <div className="pt-4 border-t border-white/10 space-y-3">
         <SummaryLine label="Subtotal" value={formatUSD(subtotalUsd)} strong />
-        {deliveryMethod === 'DELIVERY' && (
+        {isShippingOption(deliveryOption) && (
            <SummaryLine 
-             label="Costo de Envío" 
+             label={deliveryOption === 'LOCAL_DELIVERY' ? 'Delivery Maracaibo' : 'Envío nacional'} 
              value={shippingFee > 0 ? formatUSD(shippingFee) : 'GRATIS'} 
              valueClass={shippingFee === 0 ? "text-emerald-400 font-black tracking-wider text-[10px] uppercase" : ""}
            />
