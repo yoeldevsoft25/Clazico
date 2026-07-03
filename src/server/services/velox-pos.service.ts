@@ -48,14 +48,20 @@ export interface VeloxProductVariant {
 export interface VeloxProduct {
   id: string;
   name: string;
+  public_name?: string | null;
   sku: string | null;
   barcode: string | null;
+  description?: string | null;
+  public_description?: string | null;
   price_usd: number;
   price_bs: number;
   is_active: boolean;
   image_url: string | null;
+  public_image_url?: string | null;
   category: string | null;
+  public_category?: string | null;
   is_visible_public?: boolean;
+  updated_at?: string | null;
   variants?: VeloxProductVariant[];
 }
 

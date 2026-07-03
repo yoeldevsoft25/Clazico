@@ -48,6 +48,18 @@ export const createOrderSchema = z.object({
   deliveryAddressText: z.string().max(800).optional(),
   deliveryLat: z.number().min(-90).max(90).optional(),
   deliveryLng: z.number().min(-180).max(180).optional(),
+}).superRefine((value, ctx) => {
+  const isNationalShipping =
+    value.deliveryMethod === 'DELIVERY' &&
+    /^env[ií]o nacional/i.test(value.note ?? '');
+
+  if (isNationalShipping && value.paymentMethod === 'efectivo_usd') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['paymentMethod'],
+      message: 'El envío nacional no permite pago en efectivo',
+    });
+  }
 });
 
 export const orderStatusEnum = z.enum([

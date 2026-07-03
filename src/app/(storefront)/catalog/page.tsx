@@ -3,7 +3,7 @@
 import Image from 'next/image';
 import Link from 'next/link';
 import { useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowRight, Loader2, Search, SlidersHorizontal, X } from 'lucide-react';
 import { useTRPC } from '@/lib/trpc-client';
 import { formatBsS, formatUSD } from '@/lib/utils';
@@ -31,6 +31,7 @@ type FilterPanelProps = {
 };
 
 const PRODUCT_REFRESH_MS = 30_000;
+const PRODUCT_PAGE_SIZE = 250;
 
 /* ─── Product card ────────────────────────────────────────── */
 function ProductCard({ product }: { product: Product }) {
@@ -149,7 +150,7 @@ function FilterPanel({ inStock, setInStock, sortBy, setSortBy, clearFilters }: F
       <div>
         <p className="athletic-tag text-zinc-500 mb-3">Filtros</p>
         <label className="flex items-center justify-between h-11 border border-white/10 px-4 cursor-pointer text-xs font-black uppercase tracking-wider text-white hover:border-white/30 transition-colors">
-          Solo con stock
+          Solo disponibles
           <input
             type="checkbox"
             checked={inStock}
@@ -172,11 +173,17 @@ function FilterPanel({ inStock, setInStock, sortBy, setSortBy, clearFilters }: F
 /* ─── Page ────────────────────────────────────────────────── */
 export default function CatalogPage() {
   const trpc = useTRPC();
+  const queryClient = useQueryClient();
   const [category, setCategory] = useState('');
   const [search, setSearch] = useState('');
   const [sortBy, setSortBy] = useState<'name' | 'price' | 'newest'>('newest');
-  const [inStock, setInStock] = useState(true);
+  const [inStock, setInStock] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [extraPage, setExtraPage] = useState<{ key: string; items: Product[] }>({
+    key: '',
+    items: [],
+  });
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
 
   const { data: rawCategories = [] } = useQuery({
     ...trpc.product.categories.queryOptions(),
@@ -190,28 +197,78 @@ export default function CatalogPage() {
       category: category || undefined,
       sortBy,
       inStock: inStock || undefined,
-      limit: 100,
+      limit: PRODUCT_PAGE_SIZE,
+      offset: 0,
     }),
     refetchInterval: PRODUCT_REFRESH_MS,
     refetchIntervalInBackground: false,
   });
 
+  const filterKey = `${category}|${sortBy}|${inStock}`;
+  const extraProducts = useMemo(
+    () => (extraPage.key === filterKey ? extraPage.items : []),
+    [extraPage, filterKey],
+  );
+
+  const loadedProducts = useMemo(() => {
+    const firstPage = productsData?.items ?? [];
+    if (extraProducts.length === 0) return firstPage;
+
+    const seen = new Set(firstPage.map((product) => product.id));
+    return [
+      ...firstPage,
+      ...extraProducts.filter((product) => {
+        if (seen.has(product.id)) return false;
+        seen.add(product.id);
+        return true;
+      }),
+    ];
+  }, [extraProducts, productsData?.items]);
+
   const filteredProducts = useMemo(() => {
-    const products = productsData?.items ?? [];
     const query = search.trim().toLowerCase();
-    if (!query) return products;
-    return products.filter((p) =>
+    if (!query) return loadedProducts;
+    return loadedProducts.filter((p) =>
       p.name.toLowerCase().includes(query) ||
       p.sku.toLowerCase().includes(query) ||
       p.category?.toLowerCase().includes(query)
     );
-  }, [productsData?.items, search]);
+  }, [loadedProducts, search]);
+  const availableProductsCount = useMemo(
+    () => filteredProducts.filter((product) => product.currentStock > 0).length,
+    [filteredProducts],
+  );
+  const totalProducts = productsData?.total ?? loadedProducts.length;
+  const hasMoreProducts = loadedProducts.length < totalProducts;
+
+  const loadMoreProducts = async () => {
+    if (isLoadingMore || !hasMoreProducts) return;
+
+    setIsLoadingMore(true);
+    try {
+      const nextPage = await queryClient.fetchQuery(
+        trpc.product.list.queryOptions({
+          category: category || undefined,
+          sortBy,
+          inStock: inStock || undefined,
+          limit: PRODUCT_PAGE_SIZE,
+          offset: loadedProducts.length,
+        }),
+      );
+      setExtraPage((current) => ({
+        key: filterKey,
+        items: current.key === filterKey ? [...current.items, ...nextPage.items] : nextPage.items,
+      }));
+    } finally {
+      setIsLoadingMore(false);
+    }
+  };
 
   const clearFilters = () => {
     setCategory('');
     setSearch('');
     setSortBy('newest');
-    setInStock(true);
+    setInStock(false);
   };
 
   return (
@@ -228,7 +285,8 @@ export default function CatalogPage() {
                 Catálogo
               </h1>
               <p className="athletic-tag text-zinc-500 mt-2">
-                {filteredProducts.length} productos en inventario físico
+                {search.trim() ? filteredProducts.length : totalProducts} productos en catálogo
+                {!inStock && filteredProducts.length > 0 ? ` · ${availableProductsCount} con stock` : ''}
               </p>
             </div>
             {/* Mobile filter button */}
@@ -306,7 +364,7 @@ export default function CatalogPage() {
               ))}
             </div>
             <label className="flex h-8 cursor-pointer items-center gap-3 border border-white/5 bg-zinc-900/40 px-4 text-[10px] font-black uppercase tracking-widest text-white hover:border-white/10 transition-colors">
-              Solo con stock
+              Solo disponibles
               <input
                 type="checkbox"
                 checked={inStock}
@@ -346,6 +404,18 @@ export default function CatalogPage() {
               {filteredProducts.map((product) => (
                 <ProductCard key={product.id} product={product} />
               ))}
+            </div>
+          )}
+          {hasMoreProducts && !isLoading && (
+            <div className="mt-10 flex justify-center">
+              <button
+                onClick={loadMoreProducts}
+                disabled={isLoadingMore}
+                className="inline-flex h-12 items-center gap-3 border border-white bg-white px-8 text-xs font-black uppercase tracking-widest text-zinc-950 transition-colors hover:bg-transparent hover:text-white disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isLoadingMore && <Loader2 className="h-4 w-4 animate-spin" />}
+                Cargar más
+              </button>
             </div>
           )}
         </div>

@@ -21,9 +21,10 @@ export async function GET(req: Request) {
 
     const { productSyncService } = await import('@/server/services/product-sync.service');
     const result = await productSyncService.syncAll();
+    const success = result.errors.length === 0;
     return NextResponse.json(
-      { success: result.errors.length === 0, ...result },
-      { status: result.errors.length === 0 ? 200 : 502 },
+      { success, ...result },
+      { status: result.staleCachePreserved || result.total > 0 ? 200 : 502 },
     );
   } catch (error) {
     console.error('Product sync cron error:', error);

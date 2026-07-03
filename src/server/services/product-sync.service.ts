@@ -1,10 +1,25 @@
 import 'server-only';
 import { db } from '@/server/db';
 import * as schema from '@/../drizzle/schema';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import { veloxPosService, type VeloxProduct, type VeloxProductVariant } from './velox-pos.service';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
+
+const syncConfig = {
+  stockBatchSize: Number(process.env.PRODUCT_SYNC_STOCK_BATCH_SIZE || 40),
+  stockConcurrency: Number(process.env.PRODUCT_SYNC_STOCK_CONCURRENCY || 4),
+  productsTimeoutMs: Number(process.env.PRODUCT_SYNC_PRODUCTS_TIMEOUT_MS || 15_000),
+  stockTimeoutMs: Number(process.env.PRODUCT_SYNC_STOCK_TIMEOUT_MS || 5_000),
+  minProductsBeforeDeactivate: Number(process.env.PRODUCT_SYNC_MIN_DEACTIVATE_COUNT || 50),
+};
+
+type ProductSyncMetadata = {
+  isVisiblePublic?: boolean;
+  veloxUpdatedAt?: string | null;
+  stockSyncedAt?: string | null;
+  [key: string]: unknown;
+};
 
 export interface SyncResult {
   total: number;
@@ -13,12 +28,16 @@ export interface SyncResult {
   deactivated: number;
   errors: string[];
   variantsSynced: number;
+  stockSynced: number;
+  stockSkipped: number;
+  staleCachePreserved: boolean;
 }
 
 // ─── Service ─────────────────────────────────────────────────────────────────
 
 class ProductSyncService {
   private static instance: ProductSyncService | null = null;
+  private activeSync: Promise<SyncResult> | null = null;
 
   private constructor() { }
 
@@ -34,6 +53,18 @@ class ProductSyncService {
    * ProductCache + ProductVariants + ProductImageCache.
    */
   async syncAll(): Promise<SyncResult> {
+    if (this.activeSync) {
+      return this.activeSync;
+    }
+
+    this.activeSync = this.runFullSync().finally(() => {
+      this.activeSync = null;
+    });
+
+    return this.activeSync;
+  }
+
+  private async runFullSync(): Promise<SyncResult> {
     const result: SyncResult = {
       total: 0,
       created: 0,
@@ -41,32 +72,65 @@ class ProductSyncService {
       deactivated: 0,
       errors: [],
       variantsSynced: 0,
+      stockSynced: 0,
+      stockSkipped: 0,
+      staleCachePreserved: false,
     };
 
+    let veloxProducts: VeloxProduct[];
     try {
-      // Fetch all products from Velox POS
-      const veloxProducts = await veloxPosService.getProducts({ limit: 10000 });
-      result.total = veloxProducts.length;
-
-      const veloxProductIds = new Set<string>();
-
-      for (const product of veloxProducts) {
-        veloxProductIds.add(product.id);
-
-        try {
-          const syncedVariants = await this.upsertProduct(product, result);
-          result.variantsSynced += syncedVariants;
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          result.errors.push(`Failed to sync product ${product.id} (${product.sku ?? 'sin-sku'}): ${message}`);
-        }
-      }
-
-      // Deactivate products that no longer exist in Velox POS
-      result.deactivated = await this.deactivateMissingProducts(veloxProductIds);
+      veloxProducts = await withTimeout(
+        veloxPosService.getProducts({ limit: 10000 }),
+        syncConfig.productsTimeoutMs,
+        'Velox product list timed out',
+      );
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      result.errors.push(`Sync failed: ${message}`);
+      result.staleCachePreserved = true;
+      result.errors.push(`Velox unavailable; keeping cached products: ${formatError(error)}`);
+      return result;
+    }
+
+    result.total = veloxProducts.length;
+
+    if (veloxProducts.length === 0) {
+      result.staleCachePreserved = true;
+      result.errors.push('Velox returned an empty product list; keeping cached products active');
+      return result;
+    }
+
+    const existingRows = await db
+      .select({
+        id: schema.productCache.id,
+        veloxId: schema.productCache.veloxId,
+        currentStock: schema.productCache.currentStock,
+        metadata: schema.productCache.metadata,
+      })
+      .from(schema.productCache);
+    const existingByVeloxId = new Map(existingRows.map((row) => [row.veloxId, row]));
+    const stockTargets = this.selectStockTargets(veloxProducts, existingByVeloxId);
+    const stockByProductId = await this.fetchStockBatch(stockTargets, result);
+    const veloxProductIds = new Set<string>();
+
+    for (const product of veloxProducts) {
+      veloxProductIds.add(product.id);
+
+      try {
+        const syncedVariants = await this.upsertProduct(
+          product,
+          result,
+          existingByVeloxId.get(product.id),
+          stockByProductId,
+        );
+        result.variantsSynced += syncedVariants;
+      } catch (error) {
+        result.errors.push(`Failed to sync product ${product.id} (${product.sku ?? 'sin-sku'}): ${formatError(error)}`);
+      }
+    }
+
+    if (veloxProducts.length >= syncConfig.minProductsBeforeDeactivate) {
+      result.deactivated = await this.deactivateMissingProducts(veloxProductIds);
+    } else {
+      result.staleCachePreserved = true;
     }
 
     return result;
@@ -90,8 +154,21 @@ class ProductSyncService {
       deactivated: 0,
       errors: [],
       variantsSynced: 0,
+      stockSynced: 0,
+      stockSkipped: 0,
+      staleCachePreserved: false,
     };
-    await this.upsertProduct(product, result);
+    const existing = await db
+      .select({
+        id: schema.productCache.id,
+        currentStock: schema.productCache.currentStock,
+        metadata: schema.productCache.metadata,
+      })
+      .from(schema.productCache)
+      .where(eq(schema.productCache.veloxId, product.id))
+      .limit(1);
+    const stockByProductId = await this.fetchStockBatch([product], result);
+    await this.upsertProduct(product, result, existing[0], stockByProductId);
   }
 
   // ── Private Helpers ─────────────────────────────────────────────────────
@@ -99,47 +176,45 @@ class ProductSyncService {
   private async upsertProduct(
     product: VeloxProduct,
     result: SyncResult,
+    existingCache: {
+      id: string;
+      currentStock: number;
+      metadata: unknown;
+    } | undefined,
+    stockByProductId: Map<string, number>,
   ): Promise<number> {
-    // Get total stock and per-variant stock from Velox.
-    // When variants exist, the product-level stock equals the sum of
-    // variant stocks (Velox POS recomputes the parent from the variants).
     const variants = product.variants ?? [];
-    let stock = 0;
-    try {
-      const stockData = await veloxPosService.getStock(product.id);
-      stock = stockData.current_stock;
-    } catch {
-      // If stock fetch fails, fall back to sum of variant stocks.
-      stock = variants.reduce((sum, v) => sum + v.current_stock, 0);
+    const stock = stockByProductId.get(product.id) ?? existingCache?.currentStock ?? variants.reduce((sum, v) => sum + v.current_stock, 0);
+    if (!stockByProductId.has(product.id)) {
+      result.stockSkipped++;
     }
-
-    const existing = await db
-      .select({ id: schema.productCache.id })
-      .from(schema.productCache)
-      .where(eq(schema.productCache.veloxId, product.id))
-      .limit(1);
 
     const productData = {
       veloxId: product.id,
-      name: product.name,
+      name: product.public_name ?? product.name,
       sku: product.sku ?? product.id,
       barcode: product.barcode,
       priceUsd: String(product.price_usd),
       priceBs: String(product.price_bs),
       isActive: product.is_active !== false,
-      imageUrl: this.normalizeVeloxImageUrl(product.image_url),
-      category: product.category,
+      imageUrl: this.normalizeVeloxImageUrl(product.public_image_url ?? product.image_url),
+      category: product.public_category ?? product.category,
       currentStock: stock,
       metadata: {
+        ...normalizeMetadata(existingCache?.metadata),
         isVisiblePublic: product.is_visible_public !== false,
+        veloxUpdatedAt: product.updated_at ?? null,
+        stockSyncedAt: stockByProductId.has(product.id)
+          ? new Date().toISOString()
+          : normalizeMetadata(existingCache?.metadata).stockSyncedAt ?? null,
       },
       syncedAt: new Date(),
     };
 
     let productCacheId: string;
 
-    if (existing.length > 0) {
-      productCacheId = existing[0]!.id;
+    if (existingCache) {
+      productCacheId = existingCache.id;
       await db
         .update(schema.productCache)
         .set(productData)
@@ -164,9 +239,63 @@ class ProductSyncService {
     // the parent product image and any variant-level image, so the PDP can
     // swap images by color.
     await this.syncVariants(productCacheId, variants);
-    await this.syncImages(productCacheId, product.image_url, variants);
+    await this.syncImages(productCacheId, product.public_image_url ?? product.image_url, variants);
 
     return variants.length;
+  }
+
+  private selectStockTargets(
+    products: VeloxProduct[],
+    existingByVeloxId: Map<string, { currentStock: number; metadata: unknown }>,
+  ): VeloxProduct[] {
+    const scored = products.map((product, index) => {
+      const existing = existingByVeloxId.get(product.id);
+      const metadata = normalizeMetadata(existing?.metadata);
+      const isNew = !existing;
+      const changed = metadata.veloxUpdatedAt !== (product.updated_at ?? null);
+      const stockSyncedAt = metadata.stockSyncedAt ? Date.parse(metadata.stockSyncedAt) : 0;
+      return {
+        product,
+        score: isNew ? 0 : changed ? 1 : 2,
+        stockSyncedAt: Number.isFinite(stockSyncedAt) ? stockSyncedAt : 0,
+        index,
+      };
+    });
+
+    return scored
+      .sort((a, b) => a.score - b.score || a.stockSyncedAt - b.stockSyncedAt || a.index - b.index)
+      .slice(0, syncConfig.stockBatchSize)
+      .map((entry) => entry.product);
+  }
+
+  private async fetchStockBatch(
+    products: VeloxProduct[],
+    result: SyncResult,
+  ): Promise<Map<string, number>> {
+    const stockByProductId = new Map<string, number>();
+    let cursor = 0;
+
+    const workers = Array.from({ length: Math.min(syncConfig.stockConcurrency, products.length) }, async () => {
+      while (cursor < products.length) {
+        const product = products[cursor++];
+        if (!product) return;
+
+        try {
+          const stockData = await withTimeout(
+            veloxPosService.getStock(product.id),
+            syncConfig.stockTimeoutMs,
+            `Velox stock timed out for ${product.id}`,
+          );
+          stockByProductId.set(product.id, stockData.current_stock);
+          result.stockSynced++;
+        } catch (error) {
+          result.errors.push(`Stock preserved for ${product.id}: ${formatError(error)}`);
+        }
+      }
+    });
+
+    await Promise.all(workers);
+    return stockByProductId;
   }
 
   private async syncVariants(
@@ -365,6 +494,31 @@ class ProductSyncService {
 export const productSyncService = ProductSyncService.getInstance();
 export default ProductSyncService;
 
-// Avoid the unused-import warning from `and, sql` if unused after refactors
-void and;
-void sql;
+function normalizeMetadata(value: unknown): ProductSyncMetadata {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value as ProductSyncMetadata;
+  }
+
+  return {};
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}

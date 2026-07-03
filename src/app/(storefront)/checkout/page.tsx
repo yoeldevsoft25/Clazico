@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { ArrowLeft, ArrowRight, CheckCircle, Loader2, Send } from 'lucide-react';
 import { useTRPC } from '@/lib/trpc-client';
@@ -38,6 +38,7 @@ const paymentLabels: Record<PaymentMethod, string> = {
   zelle: 'Zelle',
   efectivo_usd: 'Efectivo USD',
 };
+const paymentMethods = Object.keys(paymentLabels) as PaymentMethod[];
 
 const MARACAIBO_STATE = 'Zulia';
 const MARACAIBO_CITY = 'Maracaibo';
@@ -112,11 +113,20 @@ export default function CheckoutPage() {
 
   const rate = subtotalUsd > 0 ? subtotalBs / subtotalUsd : 36.715;
   const finalTotalBs = finalTotalUsd * rate;
-  const isUsdPayment = paymentMethod !== 'pago_movil';
   const customerName = name ?? sessionUser?.name ?? '';
   const customerEmail = email ?? sessionUser?.email ?? '';
   const customerPhone = phone ?? sessionUser?.phone ?? '';
   const customerCedula = cedula ?? sessionUser?.cedula ?? '';
+  const availablePaymentMethods = useMemo(
+    () =>
+      deliveryOption === 'NATIONAL_SHIPPING'
+        ? paymentMethods.filter((method) => method !== 'efectivo_usd')
+        : paymentMethods,
+    [deliveryOption],
+  );
+  const selectedPaymentMethod = availablePaymentMethods.includes(paymentMethod)
+    ? paymentMethod
+    : 'pago_movil';
 
   const handlePlaceOrder = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -149,9 +159,9 @@ export default function CheckoutPage() {
         })),
         lookbookSlug: activeLookbookSlug,
         shippingAddressId: '00000000-0000-0000-0000-000000000000',
-        currency: isUsdPayment ? 'USD' : 'BS',
+        currency: selectedPaymentMethod === 'pago_movil' ? 'BS' : 'USD',
         exchangeRate: rate,
-        paymentMethod,
+        paymentMethod: selectedPaymentMethod,
         deliveryMethod: toApiDeliveryMethod(deliveryOption),
         deliveryState: isShippingOption(deliveryOption) ? stateName : undefined,
         deliveryCity: isShippingOption(deliveryOption) ? cityName : undefined,
@@ -176,15 +186,15 @@ export default function CheckoutPage() {
         totalBss: Number(order.totalBss ?? finalTotalBs),
       });
 
-      if (paymentMethod !== 'efectivo_usd') {
+      if (selectedPaymentMethod !== 'efectivo_usd') {
         await submitPaymentMutation.mutateAsync({
           orderId: order.id,
-          method: paymentMethod,
+          method: selectedPaymentMethod,
           reference: reference || `REF-${Date.now().toString().slice(-8)}`,
           amountUsd: finalTotalUsd,
           amountBs: finalTotalBs,
           exchangeRate: rate,
-          bankName: getPaymentProcessorName(paymentMethod, originBank),
+          bankName: getPaymentProcessorName(selectedPaymentMethod, originBank),
           accountLastFour: accountLastFour || '0000',
           proofImageUrl: 'https://images.veloxpos.com/mock-receipt.jpg',
         });
@@ -201,11 +211,11 @@ export default function CheckoutPage() {
   };
 
   if (step === 'success' && createdOrder) {
-    const totalString = isUsdPayment
+    const totalString = selectedPaymentMethod !== 'pago_movil'
       ? formatUSD(createdOrder.totalUsd)
       : formatBsS(createdOrder.totalBss);
     const storePhone = toWhatsappPhone(STORE_INFO.phone);
-    const waText = `Hola Clazico Store. Pedido ${createdOrder.orderNumber} por ${totalString}. Método: ${paymentLabels[paymentMethod]}. Nombre: ${customerName}. WhatsApp disponible: ${customerPhone}. Entrega: ${getDeliveryLabel(deliveryOption)}.`;
+    const waText = `Hola Clazico Store. Pedido ${createdOrder.orderNumber} por ${totalString}. Método: ${paymentLabels[selectedPaymentMethod]}. Nombre: ${customerName}. WhatsApp disponible: ${customerPhone}. Entrega: ${getDeliveryLabel(deliveryOption)}.`;
     const waUrl = `https://wa.me/${storePhone}?text=${encodeURIComponent(waText)}`;
 
     return (
@@ -423,14 +433,14 @@ export default function CheckoutPage() {
 
             <CheckoutSection title="3. Registro de Pago">
               <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                {(Object.keys(paymentLabels) as PaymentMethod[]).map((method) => (
+                {availablePaymentMethods.map((method) => (
                   <button
                     key={method}
                     type="button"
                     onClick={() => setPaymentMethod(method)}
                     className={cn(
                       'min-h-[44px] border text-xs font-black uppercase tracking-wider transition-all rounded-none cursor-pointer',
-                      paymentMethod === method
+                      selectedPaymentMethod === method
                         ? 'border-white bg-white text-zinc-950'
                         : 'border-white/10 bg-transparent text-zinc-400 hover:border-white/30 hover:text-white',
                     )}
@@ -442,7 +452,7 @@ export default function CheckoutPage() {
 
               <div className="mt-4 border border-white/5 bg-zinc-950 p-5">
                 <PaymentInstructions
-                  paymentMethod={paymentMethod}
+                  paymentMethod={selectedPaymentMethod}
                   reference={reference}
                   setReference={setReference}
                   originBank={originBank}
