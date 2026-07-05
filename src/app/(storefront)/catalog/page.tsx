@@ -31,7 +31,7 @@ type FilterPanelProps = {
 };
 
 const PRODUCT_REFRESH_MS = 30_000;
-const PRODUCT_PAGE_SIZE = 250;
+const PRODUCT_PAGE_SIZE = 500;
 
 /* ─── Product card ────────────────────────────────────────── */
 function ProductCard({ product }: { product: Product }) {

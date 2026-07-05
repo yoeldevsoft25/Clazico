@@ -13,7 +13,7 @@ export const productRouter = createTRPCRouter({
   list: publicProcedure
     .input(
       z.object({
-        limit: z.number().int().min(1).max(250).default(20),
+        limit: z.number().int().min(1).max(500).default(20),
         offset: z.number().int().min(0).default(0),
         category: z.string().optional(),
         sortBy: z.enum(['name', 'price', 'newest']).default('newest'),
