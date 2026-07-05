@@ -1,75 +1,155 @@
-const veloxBaseUrl = process.env.VELOX_POS_API_URL?.replace(/\/+$/, '');
-const storeId = process.env.VELOX_STORE_ID;
-const pin = process.env.VELOX_LOGIN_PIN;
-const appUrl = process.env.NEXT_PUBLIC_APP_URL?.replace(/\/+$/, '');
-const cronSecret = process.env.CRON_SECRET;
+import dotenv from 'dotenv';
 
-if (!veloxBaseUrl) throw new Error('VELOX_POS_API_URL is required');
-if (!storeId) throw new Error('VELOX_STORE_ID is required');
-if (!pin) throw new Error('VELOX_LOGIN_PIN is required');
-if (!appUrl) throw new Error('NEXT_PUBLIC_APP_URL is required');
-if (!cronSecret) throw new Error('CRON_SECRET is required');
+dotenv.config({ path: '.env.local' });
+dotenv.config();
 
-const authResponse = await fetch(`${veloxBaseUrl}/auth/login`, {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ store_id: storeId, pin }),
-});
+const veloxBaseUrl = required('VELOX_POS_API_URL').replace(/\/+$/, '');
+const storeId = required('VELOX_STORE_ID');
+const pin = required('VELOX_LOGIN_PIN');
+const storefrontSecret = process.env.STOREFRONT_API_SECRET || required('VELOX_WEBHOOK_SECRET');
+const appUrl = required('NEXT_PUBLIC_APP_URL').replace(/\/+$/, '');
+const importSecret = process.env.PRODUCT_IMPORT_AUTH_SECRET || process.env.CRON_SECRET || storefrontSecret;
+const batchSize = Math.max(1, Number(process.env.PRODUCT_IMPORT_BATCH_SIZE || 50));
 
-if (!authResponse.ok) {
-  throw new Error(`Velox auth failed: ${authResponse.status} ${await authResponse.text()}`);
+const auth = await loginToVelox();
+const [products, stockByProductId] = await Promise.all([
+  fetchPublicProducts(),
+  fetchStockStatus(auth.access_token),
+]);
+
+const productsWithStock = products.map((product) => ({
+  ...product,
+  current_stock: stockByProductId.get(product.id) ?? Number(product.current_stock ?? 0),
+}));
+const activeVeloxIds = productsWithStock
+  .filter((product) => product.is_active !== false && product.is_visible_public !== false)
+  .map((product) => product.id);
+
+let created = 0;
+let updated = 0;
+let deactivated = 0;
+
+for (let offset = 0; offset < productsWithStock.length; offset += batchSize) {
+  const batch = productsWithStock.slice(offset, offset + batchSize);
+  const isLastBatch = offset + batchSize >= productsWithStock.length;
+  const result = await importBatch(batch, {
+    deactivateMissing: isLastBatch,
+    activeVeloxIds: isLastBatch ? activeVeloxIds : undefined,
+  });
+
+  created += Number(result.created ?? 0);
+  updated += Number(result.updated ?? 0);
+  deactivated += Number(result.deactivated ?? 0);
+  console.log(JSON.stringify({
+    batch: `${offset + 1}-${offset + batch.length}`,
+    total: productsWithStock.length,
+    ...result,
+  }));
 }
 
-const authData = await authResponse.json();
-const token = authData.access_token;
+console.log(JSON.stringify({
+  success: true,
+  sourceProducts: products.length,
+  activeSourceProducts: activeVeloxIds.length,
+  created,
+  updated,
+  deactivated,
+}, null, 2));
 
-const productsResponse = await fetch(`${veloxBaseUrl}/products?limit=10000`, {
-  headers: { Authorization: `Bearer ${token}` },
-});
+async function loginToVelox() {
+  const response = await fetch(`${veloxBaseUrl}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ store_id: storeId, pin }),
+  });
 
-if (!productsResponse.ok) {
-  throw new Error(`Velox products failed: ${productsResponse.status} ${await productsResponse.text()}`);
-}
-
-const productsBody = await productsResponse.json();
-const products = Array.isArray(productsBody)
-  ? productsBody
-  : productsBody.products ?? productsBody.items ?? productsBody.data ?? [];
-
-const productsWithStock = [];
-
-for (const product of products) {
-  let currentStock = 0;
-  try {
-    const stockResponse = await fetch(`${veloxBaseUrl}/inventory/stock/${product.id}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (stockResponse.ok) {
-      const stockBody = await stockResponse.json();
-      currentStock = Number(stockBody.current_stock ?? 0);
-    }
-  } catch {
-    currentStock = 0;
+  if (!response.ok) {
+    throw new Error(`Velox auth failed: ${response.status} ${await response.text()}`);
   }
 
-  productsWithStock.push({
-    ...product,
-    current_stock: currentStock,
+  return response.json();
+}
+
+async function fetchPublicProducts() {
+  const response = await fetch(`${veloxBaseUrl}/public/menu/store/${storeId}`, {
+    headers: storefrontHeaders(),
   });
+
+  if (!response.ok) {
+    throw new Error(`Velox public menu failed: ${response.status} ${await response.text()}`);
+  }
+
+  const body = await response.json();
+  const categories = body?.menu?.categories;
+  if (!Array.isArray(categories)) {
+    throw new Error('Velox public menu did not return menu.categories');
+  }
+
+  const byId = new Map();
+  for (const category of categories) {
+    for (const product of category.products ?? []) {
+      byId.set(product.id, {
+        ...product,
+        category: product.category ?? category.name ?? null,
+      });
+    }
+  }
+
+  return [...byId.values()];
 }
 
-const importResponse = await fetch(`${appUrl}/api/cron/import-products`, {
-  method: 'POST',
-  headers: {
+async function fetchStockStatus(token) {
+  const response = await fetch(`${veloxBaseUrl}/inventory/stock/status?limit=5000`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Velox stock status failed: ${response.status} ${await response.text()}`);
+  }
+
+  const body = await response.json();
+  const items = Array.isArray(body) ? body : body.items ?? [];
+  return new Map(
+    items
+      .filter((item) => item?.product_id)
+      .map((item) => [item.product_id, Number(item.current_stock ?? 0)]),
+  );
+}
+
+async function importBatch(products, options) {
+  const response = await fetch(`${appUrl}/api/cron/import-products`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${importSecret}`,
+      'x-storefront-secret': storefrontSecret,
+    },
+    body: JSON.stringify({
+      products,
+      deactivateMissing: options.deactivateMissing,
+      activeVeloxIds: options.activeVeloxIds,
+    }),
+  });
+
+  const bodyText = await response.text();
+  if (!response.ok) {
+    throw new Error(`Netlify import failed: ${response.status} ${bodyText}`);
+  }
+
+  return JSON.parse(bodyText);
+}
+
+function storefrontHeaders() {
+  return {
     'Content-Type': 'application/json',
-    Authorization: `Bearer ${cronSecret}`,
-  },
-  body: JSON.stringify({ products: productsWithStock }),
-});
-
-const importBodyText = await importResponse.text();
-if (!importResponse.ok) {
-  throw new Error(`Netlify import failed: ${importResponse.status} ${importBodyText}`);
+    'x-storefront-store-id': storeId,
+    'x-storefront-secret': storefrontSecret,
+    'x-velox-api-version': '2.0.0',
+  };
 }
 
-console.log(importBodyText);
+function required(name) {
+  const value = process.env[name];
+  if (!value) throw new Error(`${name} is required`);
+  return value;
+}

@@ -7,10 +7,12 @@ import { veloxPosService, type VeloxProduct, type VeloxProductVariant } from './
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 const syncConfig = {
+  productBatchSize: Number(process.env.PRODUCT_SYNC_PRODUCT_BATCH_SIZE || 80),
   stockBatchSize: Number(process.env.PRODUCT_SYNC_STOCK_BATCH_SIZE || 40),
   stockConcurrency: Number(process.env.PRODUCT_SYNC_STOCK_CONCURRENCY || 4),
   productsTimeoutMs: Number(process.env.PRODUCT_SYNC_PRODUCTS_TIMEOUT_MS || 15_000),
   stockTimeoutMs: Number(process.env.PRODUCT_SYNC_STOCK_TIMEOUT_MS || 5_000),
+  maxRunMs: Number(process.env.PRODUCT_SYNC_MAX_RUN_MS || 20_000),
   minProductsBeforeDeactivate: Number(process.env.PRODUCT_SYNC_MIN_DEACTIVATE_COUNT || 50),
 };
 
@@ -25,6 +27,8 @@ export interface SyncResult {
   total: number;
   created: number;
   updated: number;
+  processed: number;
+  remaining: number;
   deactivated: number;
   errors: string[];
   variantsSynced: number;
@@ -65,10 +69,13 @@ class ProductSyncService {
   }
 
   private async runFullSync(): Promise<SyncResult> {
+    const startedAt = Date.now();
     const result: SyncResult = {
       total: 0,
       created: 0,
       updated: 0,
+      processed: 0,
+      remaining: 0,
       deactivated: 0,
       errors: [],
       variantsSynced: 0,
@@ -107,11 +114,22 @@ class ProductSyncService {
       })
       .from(schema.productCache);
     const existingByVeloxId = new Map(existingRows.map((row) => [row.veloxId, row]));
-    const stockTargets = this.selectStockTargets(veloxProducts, existingByVeloxId);
+    const knownVeloxIds = new Set(existingByVeloxId.keys());
+    const productTargets = this.selectProductTargets(
+      veloxProducts,
+      existingByVeloxId,
+      syncConfig.productBatchSize,
+    );
+    const stockTargets = this.selectStockTargets(productTargets, existingByVeloxId);
     const stockByProductId = await this.fetchStockBatch(stockTargets, result);
     const veloxProductIds = new Set<string>();
 
-    for (const product of veloxProducts) {
+    for (const product of productTargets) {
+      if (Date.now() - startedAt >= syncConfig.maxRunMs) {
+        result.staleCachePreserved = true;
+        break;
+      }
+
       veloxProductIds.add(product.id);
 
       try {
@@ -122,10 +140,17 @@ class ProductSyncService {
           stockByProductId,
         );
         result.variantsSynced += syncedVariants;
+        result.processed++;
+        knownVeloxIds.add(product.id);
       } catch (error) {
         result.errors.push(`Failed to sync product ${product.id} (${product.sku ?? 'sin-sku'}): ${formatError(error)}`);
       }
     }
+
+    for (const product of veloxProducts) {
+      veloxProductIds.add(product.id);
+    }
+    result.remaining = veloxProducts.filter((product) => !knownVeloxIds.has(product.id)).length;
 
     if (veloxProducts.length >= syncConfig.minProductsBeforeDeactivate) {
       result.deactivated = await this.deactivateMissingProducts(veloxProductIds);
@@ -151,6 +176,8 @@ class ProductSyncService {
       total: 1,
       created: 0,
       updated: 0,
+      processed: 0,
+      remaining: 0,
       deactivated: 0,
       errors: [],
       variantsSynced: 0,
@@ -169,6 +196,7 @@ class ProductSyncService {
       .limit(1);
     const stockByProductId = await this.fetchStockBatch([product], result);
     await this.upsertProduct(product, result, existing[0], stockByProductId);
+    result.processed = 1;
   }
 
   // ── Private Helpers ─────────────────────────────────────────────────────
@@ -244,19 +272,21 @@ class ProductSyncService {
     return variants.length;
   }
 
-  private selectStockTargets(
+  private selectProductTargets(
     products: VeloxProduct[],
     existingByVeloxId: Map<string, { currentStock: number; metadata: unknown }>,
+    limit: number,
   ): VeloxProduct[] {
     const scored = products.map((product, index) => {
       const existing = existingByVeloxId.get(product.id);
       const metadata = normalizeMetadata(existing?.metadata);
       const isNew = !existing;
       const changed = metadata.veloxUpdatedAt !== (product.updated_at ?? null);
+      const stockMissing = !metadata.stockSyncedAt;
       const stockSyncedAt = metadata.stockSyncedAt ? Date.parse(metadata.stockSyncedAt) : 0;
       return {
         product,
-        score: isNew ? 0 : changed ? 1 : 2,
+        score: isNew ? 0 : changed ? 1 : stockMissing ? 2 : 3,
         stockSyncedAt: Number.isFinite(stockSyncedAt) ? stockSyncedAt : 0,
         index,
       };
@@ -264,7 +294,28 @@ class ProductSyncService {
 
     return scored
       .sort((a, b) => a.score - b.score || a.stockSyncedAt - b.stockSyncedAt || a.index - b.index)
-      .slice(0, syncConfig.stockBatchSize)
+      .slice(0, Math.max(1, limit))
+      .map((entry) => entry.product);
+  }
+
+  private selectStockTargets(
+    products: VeloxProduct[],
+    existingByVeloxId: Map<string, { currentStock: number; metadata: unknown }>,
+  ): VeloxProduct[] {
+    const scored = products.map((product, index) => {
+      const existing = existingByVeloxId.get(product.id);
+      const metadata = normalizeMetadata(existing?.metadata);
+      const stockSyncedAt = metadata.stockSyncedAt ? Date.parse(metadata.stockSyncedAt) : 0;
+      return {
+        product,
+        stockSyncedAt: Number.isFinite(stockSyncedAt) ? stockSyncedAt : 0,
+        index,
+      };
+    });
+
+    return scored
+      .sort((a, b) => a.stockSyncedAt - b.stockSyncedAt || a.index - b.index)
+      .slice(0, Math.max(0, syncConfig.stockBatchSize))
       .map((entry) => entry.product);
   }
 
